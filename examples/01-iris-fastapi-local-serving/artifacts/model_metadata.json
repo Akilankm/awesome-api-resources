@@ -1,0 +1,20 @@
+{
+  "model_name": "iris-logistic-regression",
+  "model_version": "1.0.0",
+  "framework": "scikit-learn",
+  "scikit_learn_version": "1.8.0",
+  "feature_names": [
+    "sepal_length_cm",
+    "sepal_width_cm",
+    "petal_length_cm",
+    "petal_width_cm"
+  ],
+  "class_names": [
+    "setosa",
+    "versicolor",
+    "virginica"
+  ],
+  "training_rows": 120,
+  "test_rows": 30,
+  "created_at_utc": "2026-09-25T08:26:41.175687+00:00"
+}
