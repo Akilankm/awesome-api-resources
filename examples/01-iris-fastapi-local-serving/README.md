@@ -1,35 +1,52 @@
-# Iris ML Model Serving with FastAPI — Local Deployment Foundation
+# Module 01 — Serving an ML Model Locally with FastAPI
 
-This example teaches the first deployment boundary every ML engineer should understand:
+> **Professional course lab:** train a model offline, package deployable artifacts, expose inference through a typed HTTP API, test the service, and connect every local concept to its production/cloud equivalent.
 
-> **Train offline → create immutable artifacts → load artifacts in an inference service → expose the model through HTTP.**
+## What you will learn
 
-The notebook owns training and artifact creation. `app.py` owns only API startup, validation, inference, and responses.
+After completing this module, you should be able to explain—not just execute—the following:
 
-## Where this fits in cloud and deployment
+- why training and serving are separate lifecycle stages;
+- what a model artifact is and why metadata belongs beside it;
+- how a JSON request becomes a model prediction;
+- why feature order and preprocessing consistency matter;
+- how Pydantic validates an API contract;
+- how FastAPI, Uvicorn, OpenAPI, and Swagger relate;
+- the difference between liveness and readiness;
+- why a model should load once at application startup;
+- how automated API tests protect the serving contract;
+- which parts stay unchanged when the service later moves to Docker and cloud infrastructure.
+
+## Prerequisites
+
+You should already be comfortable with basic Python, pandas/scikit-learn, and train/test split. You do **not** need prior FastAPI, Docker, Kubernetes, or cloud experience.
+
+## 1. Architecture first
 
 ```text
-OFFLINE / BUILD-TIME                         ONLINE / RUN-TIME
-────────────────────                         ──────────────────
-Dataset                                      Client
-   │                                            │ HTTP JSON
-   ▼                                            ▼
-Training notebook                         FastAPI service
-   │                                            │
-   ├── preprocessing                            ▼
-   ├── model training                      model artifact
-   └── evaluation                               │
-   │                                            ▼
-   ▼                                        prediction
-artifacts/                                      │
-   ├── iris_model.joblib                        ▼
-   ├── model_metadata.json                 JSON response
-   └── metrics.json
+                     OFFLINE / BUILD TIME
+                          Iris dataset
+                               │
+                               ▼
+                      Jupyter notebook
+                               │
+              preprocessing + training + evaluation
+                               │
+                               ▼
+                         artifacts/
+                  ┌────────────┼────────────┐
+                  ▼            ▼            ▼
+             model.joblib   metadata      metrics
+                  │
+                  │ lifecycle boundary
+                  ▼
+                     ONLINE / RUN TIME
+ Client JSON ──► FastAPI ──► validation ──► model ──► JSON response
 ```
 
-The same boundary remains when the service later moves from a laptop to Docker, a VM, Kubernetes, Azure, AWS, GCP, or a managed serving platform.
+> **The API does not train the model. It only loads a validated artifact and performs inference.**
 
-## Project structure
+## 2. Repository structure
 
 ```text
 01-iris-fastapi-local-serving/
@@ -42,75 +59,78 @@ The same boundary remains when the service later moves from a laptop to Docker, 
 │   └── metrics.json
 ├── app.py
 ├── test_api.py
-└── README.md
+├── client_examples.py
+├── requests.http
+├── STUDENT_GUIDE.md
+├── EXERCISES.md
+└── TROUBLESHOOTING.md
 ```
 
-## 1. Create the Conda environment
+## 3. Create the Conda environment
 
 ```bash
 conda env create -f environment.yml
 conda activate awesome-api-resources
 ```
 
-If the environment already exists:
+Existing environment:
 
 ```bash
 conda env update -f environment.yml --prune
 conda activate awesome-api-resources
 ```
 
-## 2. Rebuild the model artifacts
+Verify:
+
+```bash
+python --version
+python -c "import fastapi, sklearn; print(fastapi.__version__, sklearn.__version__)"
+```
+
+## 4. Execute the training notebook
 
 ```bash
 jupyter lab
 ```
 
-Open and execute:
+Open `notebooks/01_train_iris_model.ipynb` and run top-to-bottom.
+
+At each section ask:
+
+1. What exists in memory now?
+2. What is persisted to disk?
+3. What will the API need later?
+4. What breaks if the feature schema changes?
+
+The committed notebook contains executed outputs for comparison with a known-good run.
+
+## 5. Inspect the model package
 
 ```text
-notebooks/01_train_iris_model.ipynb
+artifacts/
+├── iris_model.joblib
+├── model_metadata.json
+└── metrics.json
 ```
 
-The notebook is the **build stage**. It loads Iris, defines the API feature contract, splits data, trains a scikit-learn `Pipeline`, evaluates it, writes artifacts, and reloads the serialized model to prove the deployment artifact works.
+- **model**: how to preprocess and predict;
+- **metadata**: what the model expects and which version it is;
+- **metrics**: how it performed before deployment.
 
-## 3. Test the API before serving
+## 6. HTTP contract
 
-```bash
-python test_api.py
-# or
-pytest -q test_api.py
+Request:
+
+```json
+{
+  "sepal_length_cm": 5.1,
+  "sepal_width_cm": 3.5,
+  "petal_length_cm": 1.4,
+  "petal_width_cm": 0.2
+}
 ```
 
-The smoke test verifies model startup, `/health`, `/model-info`, single prediction, batch prediction, and HTTP 422 validation for invalid input.
-
-## 4. Serve locally
-
-```bash
-uvicorn app:app --host 127.0.0.1 --port 8000 --reload
-```
-
-Open:
-
-- API root: `http://127.0.0.1:8000/`
-- Health: `http://127.0.0.1:8000/health`
-- Model info: `http://127.0.0.1:8000/model-info`
-- Swagger UI: `http://127.0.0.1:8000/docs`
-- OpenAPI schema: `http://127.0.0.1:8000/openapi.json`
-
-## 5. Call the model
-
-```bash
-curl -X POST "http://127.0.0.1:8000/predict" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sepal_length_cm": 5.1,
-    "sepal_width_cm": 3.5,
-    "petal_length_cm": 1.4,
-    "petal_width_cm": 0.2
-  }'
-```
-
-Expected result from the committed artifact:
+Response:
 
 ```json
 {
@@ -125,48 +145,165 @@ Expected result from the committed artifact:
 }
 ```
 
-## Why use a scikit-learn Pipeline?
+Flow:
 
 ```text
-raw request features
-       ↓
-StandardScaler
-       ↓
-LogisticRegression
-       ↓
-prediction
+HTTP JSON
+   ↓
+Pydantic validation
+   ↓
+ordered DataFrame
+   ↓
+StandardScaler → LogisticRegression
+   ↓
+typed response
+   ↓
+HTTP JSON
 ```
 
-The serialized artifact contains preprocessing and the estimator together. This prevents **training-serving skew**.
+## 7. Test before serving
 
-## Why does app.py never train?
+```bash
+pytest -q
+# or
+python test_api.py
+```
 
-| Build / training stage | Serving / runtime stage |
+The tests verify startup, liveness, readiness, model information, single prediction, batch prediction, probability consistency, invalid input, batch limits, request headers, and OpenAPI generation.
+
+## 8. Start the local service
+
+```bash
+uvicorn app:app --host 127.0.0.1 --port 8000 --reload
+```
+
+- `uvicorn`: ASGI application server;
+- `app:app`: module `app.py`, FastAPI object `app`;
+- `127.0.0.1`: local machine only;
+- `8000`: TCP port;
+- `--reload`: development-only auto-reload.
+
+## 9. Explore the service
+
+| URL | Purpose |
 |---|---|
-| Reads training data | Receives API requests |
-| Fits parameters | Uses fitted parameters |
-| Evaluates model | Produces predictions |
-| Writes artifacts | Reads artifacts |
-| Can be compute-heavy | Must start and respond predictably |
+| `http://127.0.0.1:8000/` | service information |
+| `http://127.0.0.1:8000/health/live` | liveness |
+| `http://127.0.0.1:8000/health/ready` | readiness |
+| `http://127.0.0.1:8000/model-info` | metadata + offline metrics |
+| `http://127.0.0.1:8000/docs` | Swagger UI |
+| `http://127.0.0.1:8000/redoc` | ReDoc |
+| `http://127.0.0.1:8000/openapi.json` | OpenAPI specification |
 
-A production service should not retrain whenever its web server restarts.
+## 10. Call it three ways
 
-## Deployment mental model
+### Swagger
+Open `/docs`, choose `POST /predict`, click **Try it out**.
 
-```text
-Notebook / training job
-        ↓
-Model artifact
-        ↓
-FastAPI application
-        ↓
-Container image
-        ↓
-Container registry
-        ↓
-Cloud runtime / Kubernetes / managed service
-        ↓
-Load balancer + monitoring + autoscaling
+### cURL
+
+```bash
+curl -X POST "http://127.0.0.1:8000/predict" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sepal_length_cm": 5.1,
+    "sepal_width_cm": 3.5,
+    "petal_length_cm": 1.4,
+    "petal_width_cm": 0.2
+  }'
 ```
 
-The next deployment stage should containerize this same tested API rather than rewrite the model logic.
+### Python
+
+```bash
+python client_examples.py
+```
+
+The client does not import the model; it talks to a separately running service over HTTP.
+
+## 11. Liveness vs readiness
+
+**Liveness:** is the application process alive?
+
+`GET /health/live`
+
+**Readiness:** has the model loaded, and can this instance serve useful traffic?
+
+`GET /health/ready`
+
+This distinction becomes important for containers, load balancers, and Kubernetes.
+
+## 12. Why load the model once?
+
+Bad:
+
+```text
+request → load model → predict
+request → load model → predict
+```
+
+Correct:
+
+```text
+startup → load model once → ready
+                         ├─ request → predict
+                         ├─ request → predict
+                         └─ request → predict
+```
+
+The FastAPI lifespan hook demonstrates this lifecycle.
+
+## 13. Training-serving skew
+
+The serialized scikit-learn Pipeline contains:
+
+```text
+raw features → StandardScaler → LogisticRegression
+```
+
+The API does not recreate preprocessing independently. This reduces training-serving skew.
+
+## 14. Basic observability
+
+Every response receives:
+
+- `X-Request-ID`;
+- `X-Process-Time-Ms`.
+
+The server logs method, path, status, request ID, and processing time. Later modules will replace this introductory mechanism with production-grade observability patterns.
+
+## 15. What is intentionally deferred?
+
+Authentication, TLS, secrets, Docker, registry, cloud networking, autoscaling, centralized logs/metrics/traces, rate limiting, CI/CD, model registry, rollback, and progressive deployment are later stages—not missing concepts.
+
+## 16. Cloud mapping
+
+```text
+TODAY
+client → localhost:8000 → FastAPI → artifact
+
+LATER
+client → DNS/HTTPS → gateway/load balancer → container replicas → FastAPI → artifact
+```
+
+Infrastructure gets more sophisticated; the model-serving contract remains recognizable.
+
+## Completion criteria
+
+Before Docker, you should be able to:
+
+- [ ] explain build time vs run time;
+- [ ] recreate the Conda environment;
+- [ ] execute the notebook successfully;
+- [ ] explain every artifact;
+- [ ] run tests;
+- [ ] start Uvicorn;
+- [ ] make valid and invalid requests;
+- [ ] explain HTTP `422`;
+- [ ] explain liveness vs readiness;
+- [ ] explain OpenAPI/Swagger;
+- [ ] explain why the model loads once;
+- [ ] explain training-serving skew;
+- [ ] map this service to a future container/cloud architecture.
+
+Continue with [STUDENT_GUIDE.md](STUDENT_GUIDE.md), [EXERCISES.md](EXERCISES.md), and [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
