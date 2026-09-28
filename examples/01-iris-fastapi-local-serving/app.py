@@ -1,22 +1,24 @@
 """FastAPI inference service for the trained Iris classifier.
 
-Training is intentionally NOT performed in this file. The notebook creates
-versioned artifacts offline; this application only loads those artifacts and
-serves predictions over HTTP.
+This module represents the *online serving stage* of the ML lifecycle.
+Training is intentionally absent: the notebook creates versioned artifacts
+before deployment, and this application loads them once during startup.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import joblib
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, Request, Response
+from pydantic import BaseModel, ConfigDict, Field
 
 BASE_DIR = Path(__file__).resolve().parent
 ARTIFACT_DIR = BASE_DIR / "artifacts"
@@ -34,10 +36,12 @@ logger = logging.getLogger("iris-api")
 class IrisFeatures(BaseModel):
     """Validated request contract for one Iris flower."""
 
-    sepal_length_cm: float = Field(..., gt=0, description="Sepal length in centimetres", examples=[5.1])
-    sepal_width_cm: float = Field(..., gt=0, description="Sepal width in centimetres", examples=[3.5])
-    petal_length_cm: float = Field(..., gt=0, description="Petal length in centimetres", examples=[1.4])
-    petal_width_cm: float = Field(..., gt=0, description="Petal width in centimetres", examples=[0.2])
+    model_config = ConfigDict(extra="forbid")
+
+    sepal_length_cm: float = Field(..., gt=0, le=20, description="Sepal length in centimetres", examples=[5.1])
+    sepal_width_cm: float = Field(..., gt=0, le=20, description="Sepal width in centimetres", examples=[3.5])
+    petal_length_cm: float = Field(..., gt=0, le=20, description="Petal length in centimetres", examples=[1.4])
+    petal_width_cm: float = Field(..., gt=0, le=20, description="Petal width in centimetres", examples=[0.2])
 
 
 class PredictionResponse(BaseModel):
@@ -48,12 +52,24 @@ class PredictionResponse(BaseModel):
 
 
 class BatchPredictionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     items: list[IrisFeatures] = Field(..., min_length=1, max_length=100)
 
 
 class BatchPredictionResponse(BaseModel):
     predictions: list[PredictionResponse]
     count: int
+
+
+class LivenessResponse(BaseModel):
+    status: str
+
+
+class ReadinessResponse(BaseModel):
+    status: str
+    model_loaded: bool
+    model_name: str
+    model_version: str
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -72,35 +88,60 @@ def _assert_artifacts_exist() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load model artifacts once at application startup."""
+    """Load immutable model artifacts once when the application starts."""
 
     _assert_artifacts_exist()
-    logger.info("Loading model from %s", MODEL_PATH)
+    logger.info("Loading model artifact from %s", MODEL_PATH)
 
     app.state.model = joblib.load(MODEL_PATH)
     app.state.metadata = _load_json(METADATA_PATH)
     app.state.metrics = _load_json(METRICS_PATH)
 
     logger.info(
-        "Model loaded: name=%s version=%s",
+        "Model ready: name=%s version=%s",
         app.state.metadata["model_name"],
         app.state.metadata["model_version"],
     )
 
     yield
+
     logger.info("Shutting down Iris API")
 
 
 app = FastAPI(
     title="Iris ML Model Serving API",
-    summary="A deployment-oriented example of serving a trained scikit-learn model.",
+    summary="Professional-course example of serving a trained scikit-learn model.",
     description=(
-        "The model is trained offline in a Jupyter notebook and serialized as an artifact. "
-        "This FastAPI application performs inference only. Use /docs for interactive Swagger UI."
+        "The model is trained offline in a Jupyter notebook and serialized as a deployment artifact. "
+        "This application performs inference only. Explore the contract interactively through /docs."
     ),
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    """Attach a request ID and simple processing-time header for observability."""
+
+    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+    started = time.perf_counter()
+
+    response: Response = await call_next(request)
+
+    duration_ms = (time.perf_counter() - started) * 1000
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Process-Time-Ms"] = f"{duration_ms:.3f}"
+
+    logger.info(
+        "request_id=%s method=%s path=%s status=%s duration_ms=%.3f",
+        request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+    )
+    return response
 
 
 def _predict_one(request: Request, features: IrisFeatures) -> PredictionResponse:
@@ -135,23 +176,39 @@ def root(request: Request) -> dict[str, str]:
         "service": "Iris ML Model Serving API",
         "model": metadata["model_name"],
         "model_version": metadata["model_version"],
-        "docs": "/docs",
-        "health": "/health",
+        "swagger": "/docs",
+        "openapi": "/openapi.json",
+        "liveness": "/health/live",
+        "readiness": "/health/ready",
     }
 
 
-@app.get("/health", tags=["service"])
-def health(request: Request) -> dict[str, Any]:
-    model_loaded = hasattr(request.app.state, "model")
-    if not model_loaded:
+@app.get("/health", response_model=ReadinessResponse, include_in_schema=False)
+def health_alias(request: Request) -> ReadinessResponse:
+    """Backwards-compatible alias for readiness."""
+    return ready(request)
+
+
+@app.get("/health/live", response_model=LivenessResponse, tags=["health"])
+def live() -> LivenessResponse:
+    """Liveness means the web application process can answer a request."""
+    return LivenessResponse(status="alive")
+
+
+@app.get("/health/ready", response_model=ReadinessResponse, tags=["health"])
+def ready(request: Request) -> ReadinessResponse:
+    """Readiness means the model has loaded and this instance can serve traffic."""
+
+    if not hasattr(request.app.state, "model"):
         raise HTTPException(status_code=503, detail="Model is not loaded")
 
-    return {
-        "status": "ok",
-        "model_loaded": True,
-        "model_name": request.app.state.metadata["model_name"],
-        "model_version": request.app.state.metadata["model_version"],
-    }
+    metadata = request.app.state.metadata
+    return ReadinessResponse(
+        status="ready",
+        model_loaded=True,
+        model_name=metadata["model_name"],
+        model_version=metadata["model_version"],
+    )
 
 
 @app.get("/model-info", tags=["model"])
@@ -164,10 +221,12 @@ def model_info(request: Request) -> dict[str, Any]:
 
 @app.post("/predict", response_model=PredictionResponse, tags=["inference"])
 def predict(features: IrisFeatures, request: Request) -> PredictionResponse:
+    """Predict the Iris class for one validated feature vector."""
     return _predict_one(request, features)
 
 
 @app.post("/predict/batch", response_model=BatchPredictionResponse, tags=["inference"])
 def predict_batch(payload: BatchPredictionRequest, request: Request) -> BatchPredictionResponse:
+    """Predict up to 100 feature vectors in a single request."""
     predictions = [_predict_one(request, item) for item in payload.items]
     return BatchPredictionResponse(predictions=predictions, count=len(predictions))
