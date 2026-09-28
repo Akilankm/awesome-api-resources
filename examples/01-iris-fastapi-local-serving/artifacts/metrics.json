@@ -1,4 +1,9 @@
 {
+  "deployment_gate": {
+    "metric": "accuracy",
+    "minimum": 0.9,
+    "passed": true
+  },
   "accuracy": 0.9333333333333333,
   "classification_report": {
     "setosa": {"precision": 1.0, "recall": 1.0, "f1-score": 1.0, "support": 10.0},
