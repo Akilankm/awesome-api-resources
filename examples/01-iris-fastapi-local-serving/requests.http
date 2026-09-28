@@ -1,0 +1,35 @@
+@baseUrl = http://127.0.0.1:8000
+
+### Service root
+GET {{baseUrl}}/
+
+### Liveness
+GET {{baseUrl}}/health/live
+
+### Readiness
+GET {{baseUrl}}/health/ready
+
+### Model information
+GET {{baseUrl}}/model-info
+
+### Single prediction
+POST {{baseUrl}}/predict
+Content-Type: application/json
+
+{
+  "sepal_length_cm": 5.1,
+  "sepal_width_cm": 3.5,
+  "petal_length_cm": 1.4,
+  "petal_width_cm": 0.2
+}
+
+### Invalid prediction — observe HTTP 422
+POST {{baseUrl}}/predict
+Content-Type: application/json
+
+{
+  "sepal_length_cm": -1,
+  "sepal_width_cm": 3.5,
+  "petal_length_cm": 1.4,
+  "petal_width_cm": 0.2
+}
